@@ -126,4 +126,14 @@ export async function initDatabase() {
     }
 }
 
+/** Drain and close all pool connections — call on SIGTERM/SIGINT. */
+export async function closePool() {
+    await pool.end();
+}
+
+/** Low-level pool query — used by health check to test DB connectivity. */
+export async function pingDatabase() {
+    await pool.query('SELECT 1');
+}
+
 export default db;

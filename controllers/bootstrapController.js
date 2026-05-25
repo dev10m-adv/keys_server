@@ -1,14 +1,17 @@
 import db from '../db/database.js';
 import { asyncHandler } from '../utils/asyncHandler.js';
+import { logger } from '../utils/logger.js';
 import { issueFetchToken } from '../utils/fetchToken.js';
 import { generateAndStoreOtp, verifyOtp } from '../services/otpService.js';
 import { sendOtpEmail } from '../services/mailerService.js';
-import {
-  srpGenerateEphemeral,
-  srpStorePending,
-  srpConsumePending,
-  srpDeriveSession,
-} from '../services/srpService.js';
+
+// ── SRP imports — commented out; OTP + signed-request auth is sufficient ──────
+// import {
+//   srpGenerateEphemeral,
+//   srpStorePending,
+//   srpConsumePending,
+//   srpDeriveSession,
+// } from '../services/srpService.js';
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
 
@@ -20,7 +23,7 @@ function isValidEmail(email) {
   return /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email);
 }
 
-/** Ensure a user record exists; sets email_verified=1 if first time. */
+/** Ensure a user record exists; sets email_verified=1 after successful OTP. */
 async function ensureUser(email) {
   await db.prepare(`
     INSERT INTO users (email, email_verified)
@@ -60,7 +63,7 @@ export const sendOtp = asyncHandler(async (req, res) => {
 
   // Fire-and-forget — SMTP errors do not fail the request
   sendOtpEmail(email, otp).catch((err) =>
-    console.error(`[bootstrap] Failed to send OTP email to ${email}:`, err.message)
+    logger.error('OTP email send failed', { email, err: err.message })
   );
 
   return res.json({ message: 'OTP sent', expiresIn: 600 });
@@ -70,7 +73,7 @@ export const sendOtp = asyncHandler(async (req, res) => {
 
 export const verifyOtpAndIssueToken = asyncHandler(async (req, res) => {
   const email = normalizeEmail(req.body?.email);
-  const otp = req.body?.otp;
+  const otp   = req.body?.otp;
 
   if (!isValidEmail(email) || !otp) {
     return res.status(400).json({ error: 'invalid_request', message: 'email and otp are required' });
@@ -80,106 +83,98 @@ export const verifyOtpAndIssueToken = asyncHandler(async (req, res) => {
     await verifyOtp(email, String(otp));
   } catch (err) {
     const statusMap = {
-      otp_not_found: 404,
-      otp_expired: 401,
+      otp_not_found:         404,
+      otp_expired:           401,
       otp_attempts_exceeded: 401,
-      otp_invalid: 401,
+      otp_invalid:           401,
     };
     return res.status(statusMap[err.code] || 400).json({ error: err.code, message: err.message });
   }
 
-  // Mark email as verified and create user record if it doesn't exist yet
+  // Mark email as verified and create user record if it doesn't exist
   await ensureUser(email);
+  logger.info('OTP verified', { email });
 
   const fetchToken = issueFetchToken(email);
   return res.json({ fetchToken, expiresIn: 300 });
 });
 
-// ── POST /auth/srp/init ───────────────────────────────────────────────────────
+// ── SRP-6a authentication — commented out ─────────────────────────────────────
+// OTP email verification + signed-request authentication is sufficient.
+// SRP adds zero-knowledge password proof but is not required for this system.
+// Uncomment and restore srpService.js imports above to re-enable.
 
-export const srpInit = asyncHandler(async (req, res) => {
-  const email = normalizeEmail(req.body?.email);
-  const clientPublicEphemeral = req.body?.clientPublicEphemeral;
+// export const srpInit = asyncHandler(async (req, res) => {
+//   const email = normalizeEmail(req.body?.email);
+//   const clientPublicEphemeral = req.body?.clientPublicEphemeral;
+//
+//   if (!isValidEmail(email) || !clientPublicEphemeral) {
+//     return res.status(400).json({ error: 'invalid_request', message: 'email and clientPublicEphemeral are required' });
+//   }
+//
+//   const user = await db.prepare(`SELECT srp_verifier, srp_salt FROM users WHERE email = ?`).get(email);
+//   if (!user || !user.srp_verifier) {
+//     return res.status(404).json({ error: 'srp_not_configured', message: 'SRP is not configured for this account' });
+//   }
+//
+//   const serverEphemeral = srpGenerateEphemeral(user.srp_verifier);
+//   srpStorePending(email, serverEphemeral.secret, clientPublicEphemeral);
+//
+//   return res.json({ salt: user.srp_salt, serverPublicEphemeral: serverEphemeral.public });
+// });
 
-  if (!isValidEmail(email) || !clientPublicEphemeral) {
-    return res.status(400).json({ error: 'invalid_request', message: 'email and clientPublicEphemeral are required' });
-  }
+// export const srpComplete = asyncHandler(async (req, res) => {
+//   const email       = normalizeEmail(req.body?.email);
+//   const clientProof = req.body?.clientProof;
+//
+//   if (!isValidEmail(email) || !clientProof) {
+//     return res.status(400).json({ error: 'invalid_request', message: 'email and clientProof are required' });
+//   }
+//
+//   const session = srpConsumePending(email);
+//   if (!session) {
+//     return res.status(400).json({ error: 'srp_session_expired', message: 'SRP session not found or expired — restart from /auth/srp/init' });
+//   }
+//
+//   const user = await db.prepare(`SELECT srp_verifier, srp_salt FROM users WHERE email = ?`).get(email);
+//   if (!user || !user.srp_verifier) {
+//     return res.status(404).json({ error: 'srp_not_configured', message: 'SRP is not configured for this account' });
+//   }
+//
+//   let serverSession;
+//   try {
+//     serverSession = srpDeriveSession(
+//       session.serverEphemeralSecret,
+//       session.clientPublicEphemeral,
+//       user.srp_salt,
+//       email,
+//       user.srp_verifier,
+//       clientProof
+//     );
+//   } catch {
+//     return res.status(401).json({ error: 'proof_failed', message: 'SRP proof verification failed' });
+//   }
+//
+//   const fetchToken = issueFetchToken(email);
+//   return res.json({ fetchToken, expiresIn: 300, serverProof: serverSession.proof });
+// });
 
-  const user = await db.prepare(`SELECT srp_verifier, srp_salt FROM users WHERE email = ?`).get(email);
-  if (!user || !user.srp_verifier) {
-    return res.status(404).json({ error: 'srp_not_configured', message: 'SRP is not configured for this account' });
-  }
-
-  const serverEphemeral = srpGenerateEphemeral(user.srp_verifier);
-  srpStorePending(email, serverEphemeral.secret, clientPublicEphemeral);
-
-  return res.json({
-    salt: user.srp_salt,
-    serverPublicEphemeral: serverEphemeral.public,
-  });
-});
-
-// ── POST /auth/srp/complete ───────────────────────────────────────────────────
-
-export const srpComplete = asyncHandler(async (req, res) => {
-  const email = normalizeEmail(req.body?.email);
-  const clientProof = req.body?.clientProof;
-
-  if (!isValidEmail(email) || !clientProof) {
-    return res.status(400).json({ error: 'invalid_request', message: 'email and clientProof are required' });
-  }
-
-  const session = srpConsumePending(email);
-  if (!session) {
-    return res.status(400).json({ error: 'srp_session_expired', message: 'SRP session not found or expired — restart from /auth/srp/init' });
-  }
-
-  const user = await db.prepare(`SELECT srp_verifier, srp_salt FROM users WHERE email = ?`).get(email);
-  if (!user || !user.srp_verifier) {
-    return res.status(404).json({ error: 'srp_not_configured', message: 'SRP is not configured for this account' });
-  }
-
-  let serverSession;
-  try {
-    serverSession = srpDeriveSession(
-      session.serverEphemeralSecret,
-      session.clientPublicEphemeral,
-      user.srp_salt,
-      email,
-      user.srp_verifier,
-      clientProof
-    );
-  } catch {
-    return res.status(401).json({ error: 'proof_failed', message: 'SRP proof verification failed' });
-  }
-
-  const fetchToken = issueFetchToken(email);
-  return res.json({ fetchToken, expiresIn: 300, serverProof: serverSession.proof });
-});
-
-// ── POST /auth/srp/setup ──────────────────────────────────────────────────────
-// Auth: verifyAnyAuth (fetch token OR signed request)
-
-export const srpSetup = asyncHandler(async (req, res) => {
-  const email = req.identity.email; // set by middleware
-  const srpVerifier = req.body?.srpVerifier;
-  const srpSalt = req.body?.srpSalt;
-
-  if (!srpVerifier || !srpSalt) {
-    return res.status(400).json({ error: 'invalid_request', message: 'srpVerifier and srpSalt are required' });
-  }
-
-  await db.prepare(`
-    UPDATE users SET srp_verifier = ?, srp_salt = ? WHERE email = ?
-  `).run(srpVerifier, srpSalt, email);
-
-  return res.json({ message: 'SRP credentials updated' });
-});
+// export const srpSetup = asyncHandler(async (req, res) => {
+//   const email       = req.identity.email; // set by middleware
+//   const srpVerifier = req.body?.srpVerifier;
+//   const srpSalt     = req.body?.srpSalt;
+//
+//   if (!srpVerifier || !srpSalt) {
+//     return res.status(400).json({ error: 'invalid_request', message: 'srpVerifier and srpSalt are required' });
+//   }
+//
+//   await db.prepare(`UPDATE users SET srp_verifier = ?, srp_salt = ? WHERE email = ?`).run(srpVerifier, srpSalt, email);
+//   return res.json({ message: 'SRP credentials updated' });
+// });
 
 // ── GET /auth/bootstrap/recoverable ──────────────────────────────────────────
 // Auth: verifyFetchToken
-// Returns the list of active keys that have an encrypted blob — used by a new
-// device to discover which keys can be recovered before fetching the blobs.
+// Returns active keys with blobs — used by a new device before fetching blobs.
 
 export const listRecoverableKeys = asyncHandler(async (req, res) => {
   const email = req.identity.email;
@@ -193,9 +188,9 @@ export const listRecoverableKeys = asyncHandler(async (req, res) => {
 
   return res.json({
     keys: rows.map((r) => ({
-      keyId: r.key_id,
+      keyId:     r.key_id,
       algorithm: r.algorithm,
-      label: r.label ?? null,
+      label:     r.label ?? null,
       createdAt: r.created_at,
     })),
   });
@@ -205,16 +200,14 @@ export const listRecoverableKeys = asyncHandler(async (req, res) => {
 // Auth: verifySignedRequest
 
 export const cancelRevocation = asyncHandler(async (req, res) => {
-  const email = req.identity.email;
-  const keyId = req.body?.keyId;
+  const email  = req.identity.email;
+  const keyId  = req.body?.keyId;
 
   if (!keyId) {
     return res.status(400).json({ error: 'invalid_request', message: 'keyId is required' });
   }
 
-  const key = await db.prepare(`
-    SELECT key_id, email, status FROM keys WHERE key_id = ?
-  `).get(keyId);
+  const key = await db.prepare(`SELECT key_id, email, status FROM keys WHERE key_id = ?`).get(keyId);
 
   if (!key) {
     return res.status(404).json({ error: 'key_not_found', message: 'Key not found' });
@@ -223,12 +216,14 @@ export const cancelRevocation = asyncHandler(async (req, res) => {
     return res.status(403).json({ error: 'not_your_key', message: 'This key does not belong to your account' });
   }
   if (key.status !== 'revocation_pending') {
-    return res.status(409).json({ error: 'not_pending_revocation', message: 'Key is not in revocation_pending state' });
+    return res.status(409).json({
+      error: 'not_pending_revocation',
+      message: 'Key is not in revocation_pending state',
+    });
   }
 
-  await db.prepare(`
-    UPDATE keys SET status = 'active', revoked_at = NULL WHERE key_id = ?
-  `).run(keyId);
+  await db.prepare(`UPDATE keys SET status = 'active', revoked_at = NULL WHERE key_id = ?`).run(keyId);
+  logger.info('revocation cancelled', { keyId, email });
 
   return res.json({ keyId, status: 'active' });
 });

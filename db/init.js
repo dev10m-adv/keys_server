@@ -1,3 +1,5 @@
+// LEGACY — superseded by db/schema.sql (applied via initDatabase() in db/database.js).
+// This file is no longer imported anywhere and will be removed in a future cleanup.
 const pool = require("./index.js");
 
 const initDb = async () => {

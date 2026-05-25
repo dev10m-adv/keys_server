@@ -1,3 +1,5 @@
+// LEGACY — superseded by db/database.js (ESM adapter with ? → $N conversion).
+// This file is no longer imported anywhere and will be removed in a future cleanup.
 // index.js
 const { Pool } = require("pg");
 require("dotenv").config();

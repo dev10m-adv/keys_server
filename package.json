@@ -1,21 +1,27 @@
 {
   "name": "secmail-keys-server",
-  "version": "2.0.0",
+  "version": "2.1.0",
   "description": "SecMail end-to-end encrypted key management server",
   "main": "server.js",
   "type": "module",
+  "engines": {
+    "node": ">=20.0.0"
+  },
   "scripts": {
-    "start": "node server.js",
-    "dev": "node --watch server.js"
+    "start": "cross-env NODE_ENV=production DB_NAME=crypto_keys_prod node server.js",
+    "start:prod": "cross-env NODE_ENV=production DB_NAME=crypto_keys_prod node server.js",
+    "dev": "cross-env NODE_ENV=development DB_NAME=crypto_keys_dev node --watch server.js"
   },
   "dependencies": {
     "bcrypt": "^5.1.1",
     "cors": "^2.8.5",
+    "cross-env": "^7.0.3",
     "dotenv": "^16.4.5",
     "express": "^4.18.3",
     "express-rate-limit": "^7.3.1",
+    "helmet": "^8.2.0",
     "node-forge": "^1.3.1",
-    "nodemailer": "^6.9.14",
+    "nodemailer": "^8.0.8",
     "openpgp": "^5.11.2",
     "pg": "^8.13.1",
     "secure-remote-password": "^0.3.1",

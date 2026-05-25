@@ -1,6 +1,7 @@
 import { v4 as uuidv4 } from 'uuid';
 import db from '../db/database.js';
 import { asyncHandler } from '../utils/asyncHandler.js';
+import { logger } from '../utils/logger.js';
 import { hasJti, addJti } from '../services/jtiCacheService.js';
 import { pgpVerify } from '../services/pgpService.js';
 import { smimeVerify } from '../services/smimeService.js';
@@ -21,17 +22,23 @@ function err400(res, code, message) {
 }
 
 /**
- * Validate the timestamp and JTI embedded in a body-level signed payload.
- * These are separate from the X-Auth-Payload JTI already validated by middleware.
- * Returns an error response (and calls res.status(...)) on failure, or null on success.
+ * Validate timestamp and JTI on a body-level signed payload.
+ * Separate from the X-Auth-Payload JTI validated by middleware.
+ * Returns false (and sends the error response) on failure.
  */
-function checkBodyPayloadReplay(res, timestamp, jti) {
+async function checkBodyPayloadReplay(res, timestamp, jti) {
   if (Math.abs(Date.now() - timestamp) > TIMESTAMP_WINDOW_MS) {
-    res.status(401).json({ error: 'request_expired', message: 'Body payload timestamp is outside the 30-second window' });
+    res.status(401).json({
+      error: 'request_expired',
+      message: 'Body payload timestamp is outside the 30-second window',
+    });
     return false;
   }
-  if (hasJti(jti)) {
-    res.status(401).json({ error: 'replayed_request', message: 'Body payload JTI has already been used' });
+  if (await hasJti(jti)) {
+    res.status(401).json({
+      error: 'replayed_request',
+      message: 'Body payload JTI has already been used',
+    });
     return false;
   }
   return true;
@@ -71,7 +78,8 @@ async function autoPromotePreferred(email, algorithm, excludeKeyId, queryDb = db
 
 // ── POST /keys ────────────────────────────────────────────────────────────────
 // No standard auth middleware — proof is a self-signed body payload.
-// The signature is verified against the SUBMITTED public key, not a stored one.
+// The uploader's email MUST already exist with email_verified = 1 (requires
+// prior OTP verification via POST /auth/bootstrap + /auth/bootstrap/verify).
 
 export const uploadKey = asyncHandler(async (req, res) => {
   const { payload: payloadString, signature } = req.body || {};
@@ -83,7 +91,6 @@ export const uploadKey = asyncHandler(async (req, res) => {
   let parsed;
   try {
     parsed = JSON.parse(payloadString);
-    console.log(`Parsed payload: ${JSON.stringify(parsed)}`);
   } catch {
     return err400(res, 'invalid_payload', 'payload must be a valid JSON string');
   }
@@ -101,41 +108,48 @@ export const uploadKey = asyncHandler(async (req, res) => {
   } = parsed;
 
   const email = normalizeEmail(rawEmail);
-  console.log(`Normalized email: ${email}`);
 
   if (!email || !publicKey || !algorithm || !timestamp || !jti) {
     return err400(res, 'invalid_payload', 'email, publicKey, algorithm, timestamp, jti are required in payload');
   }
 
-  console.log(`Received uploadKey request for email: ${email}, algorithm: ${algorithm}`);
   if (!VALID_ALGORITHMS.has(algorithm)) {
     return err400(res, 'invalid_algorithm', `algorithm must be one of: ${[...VALID_ALGORITHMS].join(', ')}`);
   }
 
-  // Replay protection on the body-level payload
-  // if (!checkBodyPayloadReplay(res, timestamp, jti)) return;
+  // Enforce email verification — user must have completed OTP before uploading a key.
+  // This prevents key substitution attacks (uploading a key for an email you don't control).
+  const user = await db.prepare(`SELECT email_verified FROM users WHERE email = ?`).get(email);
+  if (!user || !user.email_verified) {
+    return res.status(403).json({
+      error: 'email_not_verified',
+      message: 'Complete email verification via POST /auth/bootstrap before uploading a key',
+    });
+  }
+
+  // Replay protection on the body-level payload (timestamp + JTI)
+  if (!await checkBodyPayloadReplay(res, timestamp, jti)) return;
 
   // Self-signed proof — proves the uploader possesses the private key
   try {
-    await verifyBodySignature(payloadString, signature, publicKey, algorithm === 'pqc' ? 'openpgp' : algorithm);
+    await verifyBodySignature(
+      payloadString,
+      signature,
+      publicKey,
+      algorithm === 'pqc' ? 'openpgp' : algorithm
+    );
   } catch (err) {
-    console.log(`Signature verification failed for email: ${email}, algorithm: ${algorithm}, error: ${err.message}`);
-    return res.status(403).json({ error: 'key_ownership_failed', message: 'Self-signed proof verification failed' });
+    logger.warn('key upload: signature verification failed', { email, algorithm, err: err.message });
+    return res.status(403).json({
+      error: 'key_ownership_failed',
+      message: 'Self-signed proof verification failed',
+    });
   }
-
-  // Self-signed proof is sufficient trust for key upload.
-  // Ensure the user row exists (required by the FK on keys.email).
-  // If the user already exists we leave their record untouched (SRP, etc.).
-  await db.prepare(`
-    INSERT INTO users (email, email_verified)
-    VALUES (?, 1)
-    ON CONFLICT (email) DO NOTHING
-  `).run(email);
 
   const keyId = uuidv4();
   const blobText = encryptedBlob != null ? JSON.stringify(encryptedBlob) : null;
 
-  // If this is the first key for this algorithm for this user → set preferred
+  // If this is the first key for this algorithm for this user → set as preferred
   const hasExistingForAlgo = await db.prepare(`
     SELECT 1 FROM keys WHERE email = ? AND algorithm = ? AND status != 'revoked' LIMIT 1
   `).get(email, algorithm);
@@ -158,7 +172,7 @@ export const uploadKey = asyncHandler(async (req, res) => {
   );
 
   addJti(jti);
-  console.log(`[keys] uploaded ${algorithm} key ${keyId} for ${email} (preferred=${isPreferred})`);
+  logger.info('key uploaded', { email, algorithm, keyId, preferred: isPreferred === 1 });
   return res.status(201).json({ keyId });
 });
 
@@ -206,7 +220,7 @@ export const getBlob = asyncHandler(async (req, res) => {
     return res.status(404).json({ error: 'key_not_found', message: 'Key not found' });
   }
 
-  // Critical ownership check — users can only fetch their own encrypted blobs
+  // Ownership check — users can only fetch their own encrypted blobs
   if (key.email !== email) {
     return res.status(403).json({ error: 'not_your_key', message: 'This key does not belong to your account' });
   }
@@ -271,12 +285,16 @@ export const updateStatus = asyncHandler(async (req, res) => {
     effectiveAt = new Date(Date.now() + 24 * 60 * 60 * 1000).toISOString();
 
     sendRevocationAlert(email, keyId).catch((e) =>
-      console.error(`[keys] revocation email failed for ${email}:`, e.message)
+      logger.error('revocation email failed', { email, keyId, err: e.message })
     );
-    console.log(`[keys] revocation_pending set for key ${keyId} (${email}), effective at ${effectiveAt}`);
+    logger.info('revocation_pending set', { keyId, email, effectiveAt });
   }
 
-  return res.json({ keyId, status: status === 'revoked' ? 'revocation_pending' : 'archived', effectiveAt });
+  return res.json({
+    keyId,
+    status: status === 'revoked' ? 'revocation_pending' : 'archived',
+    effectiveAt,
+  });
 });
 
 // ── POST /keys/rotate ─────────────────────────────────────────────────────────
@@ -302,17 +320,23 @@ export const rotateKey = asyncHandler(async (req, res) => {
   if (!oldKeyId || !newPublicKey || !algorithm || !timestamp || !jti) {
     return err400(res, 'invalid_payload', 'oldKeyId, newPublicKey, algorithm, timestamp, jti are required');
   }
-  if (!checkBodyPayloadReplay(res, timestamp, jti)) return;
+  if (!await checkBodyPayloadReplay(res, timestamp, jti)) return;
 
-  // Fetch old key to verify against
-  const oldKey = await db.prepare(`SELECT key_id, email, algorithm, status, is_preferred, public_key FROM keys WHERE key_id = ?`).get(oldKeyId);
+  const oldKey = await db.prepare(`
+    SELECT key_id, email, algorithm, status, is_preferred, public_key FROM keys WHERE key_id = ?
+  `).get(oldKeyId);
   if (!oldKey) return res.status(404).json({ error: 'key_not_found', message: 'Old key not found' });
   if (oldKey.email !== email) return res.status(403).json({ error: 'not_your_key', message: 'Old key does not belong to your account' });
   if (oldKey.status !== 'active') return res.status(409).json({ error: 'conflict', message: 'Old key must be active to rotate' });
 
   // Verify rotation proof against the OLD public key
   try {
-    await verifyBodySignature(payloadString, signature, oldKey.public_key, oldKey.algorithm === 'pqc' ? 'openpgp' : oldKey.algorithm);
+    await verifyBodySignature(
+      payloadString,
+      signature,
+      oldKey.public_key,
+      oldKey.algorithm === 'pqc' ? 'openpgp' : oldKey.algorithm
+    );
   } catch {
     return res.status(403).json({ error: 'invalid_signature', message: 'Rotation proof signature verification failed' });
   }
@@ -340,12 +364,11 @@ export const rotateKey = asyncHandler(async (req, res) => {
   })();
 
   addJti(jti);
-  console.log(`[keys] rotated key ${oldKeyId} → ${newKeyId} for ${email}`);
-
+  logger.info('key rotated', { oldKeyId, newKeyId, email });
   return res.status(201).json({ newKeyId, oldKeyId, oldStatus: 'archived' });
 });
 
-// ── PATCH /keys/:keyId/preference ────────────────────────────────────────────
+// ── PATCH /keys/:keyId/preference ─────────────────────────────────────────────
 
 export const updatePreference = asyncHandler(async (req, res) => {
   const { keyId } = req.params;
@@ -408,15 +431,21 @@ export const updateBlob = asyncHandler(async (req, res) => {
   if (intent !== 'update_blob' || payloadKeyId !== keyId) {
     return err400(res, 'invalid_payload', "payload must contain keyId, intent='update_blob', timestamp, jti");
   }
-  if (!checkBodyPayloadReplay(res, timestamp, jti)) return;
+  if (!await checkBodyPayloadReplay(res, timestamp, jti)) return;
 
-  const key = await db.prepare(`SELECT key_id, email, algorithm, public_key FROM keys WHERE key_id = ?`).get(keyId);
+  const key = await db.prepare(`
+    SELECT key_id, email, algorithm, public_key FROM keys WHERE key_id = ?
+  `).get(keyId);
   if (!key) return res.status(404).json({ error: 'key_not_found', message: 'Key not found' });
   if (key.email !== email) return res.status(403).json({ error: 'not_your_key', message: 'This key does not belong to your account' });
 
-  // Verify signature with the key being updated (proves ownership)
   try {
-    await verifyBodySignature(payloadString, signature, key.public_key, key.algorithm === 'pqc' ? 'openpgp' : key.algorithm);
+    await verifyBodySignature(
+      payloadString,
+      signature,
+      key.public_key,
+      key.algorithm === 'pqc' ? 'openpgp' : key.algorithm
+    );
   } catch {
     return res.status(403).json({ error: 'invalid_signature', message: 'Blob update signature verification failed' });
   }
@@ -437,7 +466,7 @@ export const confirmRecoveryPhrase = asyncHandler(async (req, res) => {
   const email = req.identity.email;
 
   if (req.body?.confirmed !== true) {
-    return err400(res, 'invalid_request', "confirmed: true is required");
+    return err400(res, 'invalid_request', 'confirmed: true is required');
   }
 
   const key = await db.prepare(`SELECT key_id, email FROM keys WHERE key_id = ?`).get(keyId);
@@ -471,7 +500,7 @@ export const deleteKey = asyncHandler(async (req, res) => {
   if (intent !== 'permanent_delete' || payloadKeyId !== keyId) {
     return err400(res, 'invalid_payload', "payload must contain keyId, intent='permanent_delete', timestamp, jti");
   }
-  if (!checkBodyPayloadReplay(res, timestamp, jti)) return;
+  if (!await checkBodyPayloadReplay(res, timestamp, jti)) return;
 
   const key = await db.prepare(`
     SELECT key_id, email, algorithm, label, public_key, encrypted_blob,
@@ -482,9 +511,14 @@ export const deleteKey = asyncHandler(async (req, res) => {
   if (!key) return res.status(404).json({ error: 'key_not_found', message: 'Key not found' });
   if (key.email !== email) return res.status(403).json({ error: 'not_your_key', message: 'This key does not belong to your account' });
 
-  // Key-specific proof — stolen signed request headers alone cannot delete a key
+  // Key-specific proof — stolen signed-request headers alone cannot delete a key
   try {
-    await verifyBodySignature(payloadString, signature, key.public_key, key.algorithm === 'pqc' ? 'openpgp' : key.algorithm);
+    await verifyBodySignature(
+      payloadString,
+      signature,
+      key.public_key,
+      key.algorithm === 'pqc' ? 'openpgp' : key.algorithm
+    );
   } catch {
     return res.status(403).json({ error: 'invalid_signature', message: 'Delete proof signature verification failed' });
   }
@@ -517,9 +551,9 @@ export const deleteKey = asyncHandler(async (req, res) => {
   addJti(jti);
 
   sendDeletionAlert(email, keyId, recoverableUntil).catch((e) =>
-    console.error(`[keys] deletion email failed for ${email}:`, e.message)
+    logger.error('deletion email failed', { email, keyId, err: e.message })
   );
-  console.log(`[keys] deleted key ${keyId} for ${email}, recoverable until ${recoverableUntil.toISOString()}`);
+  logger.info('key deleted', { keyId, email, recoverableUntil: recoverableUntil.toISOString() });
 
   return res.json({
     keyId,
@@ -545,18 +579,23 @@ export const recoverKey = asyncHandler(async (req, res) => {
   `).get(keyId, email);
 
   if (!deleted) {
-    return res.status(404).json({ error: 'not_recoverable', message: 'Deleted key not found or does not belong to your account' });
+    return res.status(404).json({
+      error: 'not_recoverable',
+      message: 'Deleted key not found or does not belong to your account',
+    });
   }
   if (new Date(deleted.recoverable_until) < new Date()) {
-    return res.status(404).json({ error: 'not_recoverable', message: 'Recovery window has expired for this key' });
+    return res.status(404).json({
+      error: 'not_recoverable',
+      message: 'Recovery window has expired for this key',
+    });
   }
 
-  // Restored as 'archived' — user must explicitly promote to active if they want it as default
+  // Restored as 'archived' — user must explicitly promote to active
   const hasActiveForAlgo = await db.prepare(`
     SELECT is_preferred FROM keys WHERE email = ? AND algorithm = ? AND status = 'active' LIMIT 1
   `).get(email, deleted.algorithm);
 
-  // Auto-prefer only if no active key exists for this algorithm
   const setPreferred = !hasActiveForAlgo ? 1 : 0;
   const recoveredAt = new Date().toISOString();
 
@@ -579,6 +618,6 @@ export const recoverKey = asyncHandler(async (req, res) => {
     await tx.prepare(`DELETE FROM deleted_keys WHERE key_id = ?`).run(keyId);
   })();
 
-  console.log(`[keys] recovered key ${keyId} for ${email}`);
+  logger.info('key recovered', { keyId, email });
   return res.json({ keyId, status: 'archived', recoveredAt });
 });
