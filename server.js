@@ -5,13 +5,40 @@ import cors from 'cors';
 import bootstrapRoutes from './routes/bootstrap.js';
 import keysRoutes from './routes/keys.js';
 import discoveryRoutes from './routes/discovery.js';
+import health from './routes/health.js';
 import { startBackgroundJobs } from './services/backgroundJobs.js';
 import { initDatabase } from './db/database.js';
 
 const app = express();
 
 // ── CORS ──────────────────────────────────────────────────────────────────────
-app.use(cors());
+const corsOrigins = (process.env.CORS_ORIGINS || '*')
+  .split(',')
+  .map((origin) => origin.trim())
+  .filter(Boolean);
+
+const corsOptions = {
+  origin(origin, callback) {
+    // Allow non-browser clients (no Origin header) and wildcard local dev.
+    if (!origin || corsOrigins.includes('*') || corsOrigins.includes(origin)) {
+      callback(null, true);
+      return;
+    }
+    callback(new Error(`CORS blocked origin: ${origin}`));
+  },
+  methods: ['GET', 'POST', 'PUT', 'PATCH', 'DELETE', 'OPTIONS'],
+  allowedHeaders: [
+    'Content-Type',
+    'Authorization',
+    'X-Auth-Payload',
+    'X-Auth-Signature',
+  ],
+  exposedHeaders: ['Content-Type'],
+  optionsSuccessStatus: 204,
+};
+
+app.use(cors(corsOptions));
+app.options('*', cors(corsOptions));
 
 // ── Raw body capture for signed-request body-hash verification ────────────────
 // Must be applied BEFORE express.json() so the raw Buffer is available to the
@@ -25,6 +52,39 @@ app.use(
   })
 );
 
+// ── Request logging (debug) ──────────────────────────────────────────────────
+const requestLoggingEnabled =
+  process.env.REQUEST_LOGGING === 'true' || process.env.NODE_ENV !== 'production';
+
+if (requestLoggingEnabled) {
+  app.use((req, res, next) => {
+    const startedAt = Date.now();
+    const requestId = Math.random().toString(36).slice(2, 10);
+
+    const safeHeaders = {
+      origin: req.headers.origin,
+      'content-type': req.headers['content-type'],
+      'user-agent': req.headers['user-agent'],
+      authorization: req.headers.authorization ? '[redacted]' : undefined,
+      'x-auth-payload': req.headers['x-auth-payload'] ? '[redacted]' : undefined,
+      'x-auth-signature': req.headers['x-auth-signature'] ? '[redacted]' : undefined,
+    };
+
+    console.log(
+      `[req:${requestId}] -> ${req.method} ${req.originalUrl} ip=${req.ip} headers=${JSON.stringify(safeHeaders)}`
+    );
+
+    res.on('finish', () => {
+      const durationMs = Date.now() - startedAt;
+      console.log(
+        `[req:${requestId}] <- ${res.statusCode} ${req.method} ${req.originalUrl} ${durationMs}ms`
+      );
+    });
+
+    next();
+  });
+}
+
 // ── Routes ────────────────────────────────────────────────────────────────────
 //
 // Discovery routes are mounted at /keys but come BEFORE the protected keys
@@ -32,6 +92,7 @@ app.use(
 app.use('/auth', bootstrapRoutes);
 app.use('/keys', discoveryRoutes);
 app.use('/keys', keysRoutes);
+app.use('/health', health); // Health check route
 
 // ── 404 ───────────────────────────────────────────────────────────────────────
 app.use((_req, res) => {

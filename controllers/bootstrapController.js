@@ -176,6 +176,31 @@ export const srpSetup = asyncHandler(async (req, res) => {
   return res.json({ message: 'SRP credentials updated' });
 });
 
+// ── GET /auth/bootstrap/recoverable ──────────────────────────────────────────
+// Auth: verifyFetchToken
+// Returns the list of active keys that have an encrypted blob — used by a new
+// device to discover which keys can be recovered before fetching the blobs.
+
+export const listRecoverableKeys = asyncHandler(async (req, res) => {
+  const email = req.identity.email;
+
+  const rows = await db.prepare(`
+    SELECT key_id, algorithm, label, created_at
+    FROM keys
+    WHERE email = ? AND status = 'active' AND encrypted_blob IS NOT NULL
+    ORDER BY created_at DESC
+  `).all(email);
+
+  return res.json({
+    keys: rows.map((r) => ({
+      keyId: r.key_id,
+      algorithm: r.algorithm,
+      label: r.label ?? null,
+      createdAt: r.created_at,
+    })),
+  });
+});
+
 // ── POST /auth/bootstrap/cancel-revocation ────────────────────────────────────
 // Auth: verifySignedRequest
 

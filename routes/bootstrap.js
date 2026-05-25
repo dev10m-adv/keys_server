@@ -2,7 +2,7 @@ import { Router } from 'express';
 import rateLimit from 'express-rate-limit';
 import * as bootstrap from '../controllers/bootstrapController.js';
 import { verifySignedRequest } from '../middleware/verifySignedRequest.js';
-import { verifyAnyAuth } from '../middleware/verifyFetchToken.js';
+import { verifyAnyAuth, verifyFetchToken } from '../middleware/verifyFetchToken.js';
 
 const router = Router();
 
@@ -31,6 +31,9 @@ router.post('/bootstrap/verify', bootstrap.verifyOtpAndIssueToken);
 // SRP-6a authentication (password proof without sending the password)
 router.post('/srp/init',     bootstrap.srpInit);
 router.post('/srp/complete', bootstrap.srpComplete);
+
+// List keys with blobs available for recovery (requires fetch token from OTP/SRP)
+router.get('/bootstrap/recoverable', verifyFetchToken, bootstrap.listRecoverableKeys);
 
 // ── Authenticated ─────────────────────────────────────────────────────────────
 

@@ -4,3 +4,4 @@ build
 *.db
 *.db-wal
 *.db-shm
+SecMail-keys-API.postman_collection.json
