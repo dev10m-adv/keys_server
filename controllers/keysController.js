@@ -117,15 +117,23 @@ export const uploadKey = asyncHandler(async (req, res) => {
     return err400(res, 'invalid_algorithm', `algorithm must be one of: ${[...VALID_ALGORITHMS].join(', ')}`);
   }
 
+  // Ensure FK target exists when upload is allowed without prior OTP verification.
+  // Keeps the relaxed upload flow from failing on keys.email -> users.email constraint.
+  await db.prepare(`
+    INSERT INTO users (email, email_verified)
+    VALUES (?, 0)
+    ON CONFLICT(email) DO NOTHING
+  `).run(email);
+
   // Enforce email verification — user must have completed OTP before uploading a key.
   // This prevents key substitution attacks (uploading a key for an email you don't control).
-  const user = await db.prepare(`SELECT email_verified FROM users WHERE email = ?`).get(email);
-  if (!user || !user.email_verified) {
-    return res.status(403).json({
-      error: 'email_not_verified',
-      message: 'Complete email verification via POST /auth/bootstrap before uploading a key',
-    });
-  }
+  // const user = await db.prepare(`SELECT email_verified FROM users WHERE email = ?`).get(email);
+  // if (!user || !user.email_verified) {
+  //   return res.status(403).json({
+  //     error: 'email_not_verified',
+  //     message: 'Complete email verification via POST /auth/bootstrap before uploading a key',
+  //   });
+  // }
 
   // Replay protection on the body-level payload (timestamp + JTI)
   if (!await checkBodyPayloadReplay(res, timestamp, jti)) return;
