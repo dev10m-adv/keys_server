@@ -20,8 +20,8 @@ function write(level, msg, extra = {}) {
 export const logger = {
   fatal: (msg, extra = {}) => write('fatal', msg, extra),
   error: (msg, extra = {}) => write('error', msg, extra),
-  warn:  (msg, extra = {}) => write('warn',  msg, extra),
-  info:  (msg, extra = {}) => write('info',  msg, extra),
+  warn: (msg, extra = {}) => write('warn', msg, extra),
+  info: (msg, extra = {}) => write('info', msg, extra),
   debug: (msg, extra = {}) => write('debug', msg, extra),
 };
 
@@ -30,7 +30,6 @@ export function requestLogger(req, res, next) {
   const startedAt = Date.now();
   const requestId = Math.random().toString(36).slice(2, 10);
   req.requestId = requestId;
-
   logger.info('request received', {
     requestId,
     method: req.method,

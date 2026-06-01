@@ -268,7 +268,6 @@ export const updateStatus = asyncHandler(async (req, res) => {
   if (!['archived', 'revoked'].includes(status)) {
     return err400(res, 'invalid_status', "status must be 'archived' or 'revoked'");
   }
-
   const key = await db.prepare(`
     SELECT key_id, email, algorithm, status, is_preferred FROM keys WHERE key_id = ?
   `).get(keyId);
@@ -278,6 +277,7 @@ export const updateStatus = asyncHandler(async (req, res) => {
   if (key.status !== 'active') return res.status(409).json({ error: 'conflict', message: `Cannot change status of a ${key.status} key` });
 
   let effectiveAt;
+
 
   if (status === 'archived') {
     await db.transaction(async (tx) => {
@@ -387,6 +387,7 @@ export const rotateKey = asyncHandler(async (req, res) => {
 export const updatePreference = asyncHandler(async (req, res) => {
   const { keyId } = req.params;
   const email = req.identity.email;
+  console.log("UpdatePreference Data gotted : ", req.body, req.params);
   const { isPreferred, discoverable, label, hasRecoveryPhrase } = req.body || {};
 
   const key = await db.prepare(`SELECT key_id, email, algorithm, status FROM keys WHERE key_id = ?`).get(keyId);
@@ -394,10 +395,14 @@ export const updatePreference = asyncHandler(async (req, res) => {
   if (key.email !== email) return res.status(403).json({ error: 'not_your_key', message: 'This key does not belong to your account' });
 
   await db.transaction(async (tx) => {
-    if (isPreferred === true) {
-      // Atomically clear all other preferred keys for this algorithm then set this one
-      await tx.prepare(`UPDATE keys SET is_preferred = 0 WHERE email = ? AND algorithm = ?`).run(email, key.algorithm);
-      await tx.prepare(`UPDATE keys SET is_preferred = 1 WHERE key_id = ?`).run(keyId);
+    if (isPreferred !== undefined) {
+      if (isPreferred === true) {
+        // Atomically clear all other preferred keys for this algorithm then set this one
+        await tx.prepare(`UPDATE keys SET is_preferred = 0 WHERE email = ? AND algorithm = ?`).run(email, key.algorithm);
+        await tx.prepare(`UPDATE keys SET is_preferred = 1 WHERE key_id = ?`).run(keyId);
+      } else {
+        await tx.prepare(`UPDATE keys SET is_preferred = 0 WHERE key_id = ?`).run(keyId);
+      }
     }
     if (discoverable !== undefined) {
       await tx.prepare(`UPDATE keys SET discoverable = ? WHERE key_id = ?`).run(discoverable ? 1 : 0, keyId);
@@ -497,6 +502,7 @@ export const confirmRecoveryPhrase = asyncHandler(async (req, res) => {
 export const deleteKey = asyncHandler(async (req, res) => {
   const { keyId } = req.params;
   const email = req.identity.email;
+  console.log("DeleteKey Data gotted : ", req.body, req.params);
   const { payload: payloadString, signature } = req.body || {};
 
   if (typeof payloadString !== 'string' || typeof signature !== 'string') {

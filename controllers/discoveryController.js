@@ -17,7 +17,7 @@ function isValidEmail(email) {
 // Public — no auth required. Used by senders before encrypting.
 
 export const getPreference = asyncHandler(async (req, res) => {
-  const emailParam  = req.query.email;
+  const emailParam = req.query.email;
   const emailsParam = req.query.emails;
 
   // ── Single-email path ─────────────────────────────────────────────────────
