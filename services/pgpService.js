@@ -1,6 +1,56 @@
 import * as openpgp from 'openpgp';
 
 /**
+ * Return the uppercase hex fingerprint for an armored OpenPGP public key.
+ * Returns null if the key cannot be parsed.
+ */
+export async function pgpGetFingerprint(armoredPublicKey) {
+  try {
+    const key = await openpgp.readKey({ armoredKey: armoredPublicKey });
+    return key.getFingerprint().toUpperCase();
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Re-armor a public key with Comment headers matching the keys.openpgp.org format:
+ *   Comment: XXXX XXXX XXXX XXXX XXXX  XXXX XXXX XXXX XXXX XXXX
+ *   Comment: Name <email>
+ *
+ * Strips any existing Version/Hash/Comment headers so the output is clean.
+ * Returns the original armored string unchanged if parsing fails.
+ */
+export async function pgpFormatArmor(armoredPublicKey) {
+  try {
+    const key = await openpgp.readKey({ armoredKey: armoredPublicKey });
+
+    // Fingerprint formatted as 10 groups of 4, double-space in the middle
+    const fp = key.getFingerprint().toUpperCase();
+    const groups = fp.match(/.{4}/g);
+    const formattedFp = groups.slice(0, 5).join(' ') + '  ' + groups.slice(5).join(' ');
+
+    const userIds = key.getUserIDs(); // e.g. ["Name <email>"]
+    const primaryUid = userIds[0] ?? null;
+
+    // key.armor() may include a Version header — strip all headers, keep only ours
+    const raw = key.armor();
+    const lines = raw.split('\n');
+    const blankIdx = lines.findIndex((l, i) => i > 0 && l.trim() === '');
+    const bodyLines = blankIdx >= 0 ? lines.slice(blankIdx) : lines.slice(1);
+
+    return [
+      lines[0],                                              // -----BEGIN PGP PUBLIC KEY BLOCK-----
+      `Comment: ${formattedFp}`,
+      ...(primaryUid ? [`Comment: ${primaryUid}`] : []),
+      ...bodyLines,                                          // blank line + base64 + checksum + -----END-----
+    ].join('\n');
+  } catch {
+    return armoredPublicKey;
+  }
+}
+
+/**
  * Verify an OpenPGP signature over payloadString.
  *
  * signatureBase64 may be either:

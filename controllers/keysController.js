@@ -3,7 +3,7 @@ import db from '../db/database.js';
 import { asyncHandler } from '../utils/asyncHandler.js';
 import { logger } from '../utils/logger.js';
 import { hasJti, addJti } from '../services/jtiCacheService.js';
-import { pgpVerify } from '../services/pgpService.js';
+import { pgpVerify, pgpGetFingerprint } from '../services/pgpService.js';
 import { smimeVerify } from '../services/smimeService.js';
 import { sendRevocationAlert, sendDeletionAlert } from '../services/mailerService.js';
 
@@ -157,6 +157,11 @@ export const uploadKey = asyncHandler(async (req, res) => {
   const keyId = uuidv4();
   const blobText = encryptedBlob != null ? JSON.stringify(encryptedBlob) : null;
 
+  // Extract PGP fingerprint for openpgp and pqc (pqc wraps an openpgp key)
+  const fingerprint = (algorithm === 'openpgp' || algorithm === 'pqc')
+    ? await pgpGetFingerprint(publicKey)
+    : null;
+
   // If this is the first key for this algorithm for this user → set as preferred
   const hasExistingForAlgo = await db.prepare(`
     SELECT 1 FROM keys WHERE email = ? AND algorithm = ? AND status != 'revoked' LIMIT 1
@@ -164,15 +169,16 @@ export const uploadKey = asyncHandler(async (req, res) => {
   const isPreferred = hasExistingForAlgo ? 0 : 1;
 
   await db.prepare(`
-    INSERT INTO keys (key_id, email, algorithm, label, public_key, encrypted_blob,
+    INSERT INTO keys (key_id, email, algorithm, label, public_key, fingerprint, encrypted_blob,
                       is_preferred, discoverable, has_recovery_phrase)
-    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
   `).run(
     keyId,
     email,
     algorithm,
     label ?? null,
     publicKey,
+    fingerprint,
     blobText,
     isPreferred,
     discoverable === false ? 0 : 1,

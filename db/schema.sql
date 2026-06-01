@@ -13,6 +13,7 @@ CREATE TABLE IF NOT EXISTS keys (
   algorithm           TEXT NOT NULL CHECK(algorithm IN ('openpgp','smime','pqc')),
   label               TEXT,
   public_key          TEXT NOT NULL,
+  fingerprint         TEXT,
   encrypted_blob      TEXT,
   status              TEXT NOT NULL DEFAULT 'active'
                       CHECK(status IN ('active','archived','revoked','revocation_pending')),
@@ -24,6 +25,9 @@ CREATE TABLE IF NOT EXISTS keys (
   revoked_at          TIMESTAMPTZ
 );
 
+-- Idempotent migration: add fingerprint column to existing tables
+ALTER TABLE keys ADD COLUMN IF NOT EXISTS fingerprint TEXT;
+
 -- Enforces at most one preferred active key per algorithm per user
 CREATE UNIQUE INDEX IF NOT EXISTS idx_one_preferred
   ON keys(email, algorithm)
@@ -32,6 +36,11 @@ CREATE UNIQUE INDEX IF NOT EXISTS idx_one_preferred
 -- Fast discovery lookup
 CREATE INDEX IF NOT EXISTS idx_discoverable
   ON keys(email, algorithm, discoverable, status);
+
+-- VKS fingerprint lookup
+CREATE INDEX IF NOT EXISTS idx_fingerprint
+  ON keys(fingerprint)
+  WHERE fingerprint IS NOT NULL;
 
 -- Deleted keys — full record preserved for 6 months so the user can recover
 -- and still decrypt old mail that was encrypted to that key

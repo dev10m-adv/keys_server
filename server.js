@@ -7,6 +7,7 @@ import rateLimit from 'express-rate-limit';
 import bootstrapRoutes from './routes/bootstrap.js';
 import keysRoutes from './routes/keys.js';
 import discoveryRoutes from './routes/discovery.js';
+import vksRoutes from './routes/vks.js';
 import health from './routes/health.js';
 import { startBackgroundJobs } from './services/backgroundJobs.js';
 import { initDatabase, closePool } from './db/database.js';
@@ -86,6 +87,7 @@ app.use(globalRateLimit);
 app.use('/auth',   bootstrapRoutes);
 app.use('/keys',   discoveryRoutes);
 app.use('/keys',   keysRoutes);
+app.use('/vks',    vksRoutes);
 app.use('/health', health);
 
 // ── 404 ───────────────────────────────────────────────────────────────────────
